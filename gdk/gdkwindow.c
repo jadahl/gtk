@@ -11518,3 +11518,17 @@ gdk_window_show_window_menu (GdkWindow *window,
   else
     return FALSE;
 }
+
+void
+gdk_window_set_attachment_parameters (GdkWindow                     *window,
+                                      const GdkAttachmentParameters *parameters)
+{
+  GdkWindowImplClass *impl_class;
+
+  g_return_if_fail (GDK_IS_WINDOW (window));
+
+  impl_class = GDK_WINDOW_IMPL_GET_CLASS (window->impl);
+
+  if (impl_class->set_attachment_parameters)
+    impl_class->set_attachment_parameters (window, parameters);
+}
