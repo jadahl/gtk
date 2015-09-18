@@ -155,6 +155,19 @@ void       gtk_menu_popup_for_device      (GtkMenu             *menu,
                                            guint                button,
                                            guint32              activate_time);
 
+GDK_AVAILABLE_IN_3_18
+void       gtk_menu_update_parameters     (GtkMenu                 *menu,
+                                           GdkAttachmentParameters *parameters);
+
+GDK_AVAILABLE_IN_3_18
+void       gtk_menu_popup_with_parameters (GtkMenu                 *menu,
+                                           GdkDevice               *device,
+                                           GtkWidget               *parent_menu_shell,
+                                           GtkWidget               *attachment_widget,
+                                           guint                    button,
+                                           guint32                  activate_time,
+                                           GdkAttachmentParameters *parameters);
+
 /* Position the menu according to its position function. Called
  * from gtkmenuitem.c when a menu-item changes its allocation
  */
