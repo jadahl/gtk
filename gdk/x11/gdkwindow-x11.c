@@ -39,6 +39,7 @@
 #include "gdkglcontext-x11.h"
 #include "gdkprivate-x11.h"
 #include "gdk-private.h"
+#include "gdkattachmentparametersprivate.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -5681,6 +5682,617 @@ gdk_x11_window_show_window_menu (GdkWindow *window,
   return TRUE;
 }
 
+static gint
+get_axis (GdkAttachmentOption option)
+{
+  switch (option)
+    {
+    case GDK_ATTACHMENT_ATTACH_LEFT_EDGE:
+    case GDK_ATTACHMENT_ATTACH_RIGHT_EDGE:
+    case GDK_ATTACHMENT_ATTACH_FORWARD_EDGE:
+    case GDK_ATTACHMENT_ATTACH_BACKWARD_EDGE:
+    case GDK_ATTACHMENT_ALIGN_LEFT_EDGES:
+    case GDK_ATTACHMENT_ALIGN_RIGHT_EDGES:
+    case GDK_ATTACHMENT_ALIGN_FORWARD_EDGES:
+    case GDK_ATTACHMENT_ALIGN_BACKWARD_EDGES:
+    case GDK_ATTACHMENT_CENTER_HORIZONTALLY:
+    case GDK_ATTACHMENT_CENTER_ON_LEFT_EDGE:
+    case GDK_ATTACHMENT_CENTER_ON_RIGHT_EDGE:
+    case GDK_ATTACHMENT_CENTER_ON_FORWARD_EDGE:
+    case GDK_ATTACHMENT_CENTER_ON_BACKWARD_EDGE:
+    case GDK_ATTACHMENT_ATTACH_LEFT_OF_CENTER:
+    case GDK_ATTACHMENT_ATTACH_RIGHT_OF_CENTER:
+    case GDK_ATTACHMENT_ATTACH_FORWARD_OF_CENTER:
+    case GDK_ATTACHMENT_ATTACH_BACKWARD_OF_CENTER:
+      return 0;
+
+    case GDK_ATTACHMENT_ATTACH_TOP_EDGE:
+    case GDK_ATTACHMENT_ATTACH_BOTTOM_EDGE:
+    case GDK_ATTACHMENT_ALIGN_TOP_EDGES:
+    case GDK_ATTACHMENT_ALIGN_BOTTOM_EDGES:
+    case GDK_ATTACHMENT_CENTER_VERTICALLY:
+    case GDK_ATTACHMENT_CENTER_ON_TOP_EDGE:
+    case GDK_ATTACHMENT_CENTER_ON_BOTTOM_EDGE:
+    case GDK_ATTACHMENT_ATTACH_ABOVE_CENTER:
+    case GDK_ATTACHMENT_ATTACH_BELOW_CENTER:
+      return 1;
+
+    default:
+      break;
+    }
+
+  return -1;
+}
+
+static GdkAttachmentOption
+get_base_option (GdkAttachmentOption option,
+                 gboolean            is_right_to_left)
+{
+  switch (option)
+    {
+    case GDK_ATTACHMENT_ATTACH_FORWARD_EDGE:
+      return is_right_to_left ? GDK_ATTACHMENT_ATTACH_LEFT_EDGE : GDK_ATTACHMENT_ATTACH_RIGHT_EDGE;
+
+    case GDK_ATTACHMENT_ATTACH_BACKWARD_EDGE:
+      return is_right_to_left ? GDK_ATTACHMENT_ATTACH_RIGHT_EDGE : GDK_ATTACHMENT_ATTACH_LEFT_EDGE;
+
+    case GDK_ATTACHMENT_ALIGN_FORWARD_EDGES:
+      return is_right_to_left ? GDK_ATTACHMENT_ALIGN_LEFT_EDGES : GDK_ATTACHMENT_ALIGN_RIGHT_EDGES;
+
+    case GDK_ATTACHMENT_ALIGN_BACKWARD_EDGES:
+      return is_right_to_left ? GDK_ATTACHMENT_ALIGN_RIGHT_EDGES : GDK_ATTACHMENT_ALIGN_LEFT_EDGES;
+
+    case GDK_ATTACHMENT_CENTER_ON_FORWARD_EDGE:
+      return is_right_to_left ? GDK_ATTACHMENT_CENTER_ON_LEFT_EDGE : GDK_ATTACHMENT_CENTER_ON_RIGHT_EDGE;
+
+    case GDK_ATTACHMENT_CENTER_ON_BACKWARD_EDGE:
+      return is_right_to_left ? GDK_ATTACHMENT_CENTER_ON_RIGHT_EDGE : GDK_ATTACHMENT_CENTER_ON_LEFT_EDGE;
+
+    case GDK_ATTACHMENT_ATTACH_FORWARD_OF_CENTER:
+      return is_right_to_left ? GDK_ATTACHMENT_ATTACH_LEFT_OF_CENTER : GDK_ATTACHMENT_ATTACH_RIGHT_OF_CENTER;
+
+    case GDK_ATTACHMENT_ATTACH_BACKWARD_OF_CENTER:
+      return is_right_to_left ? GDK_ATTACHMENT_ATTACH_RIGHT_OF_CENTER : GDK_ATTACHMENT_ATTACH_LEFT_OF_CENTER;
+
+    default:
+      break;
+    }
+
+  return option;
+}
+
+static gboolean
+is_satisfiable (const GdkAttachmentParameters *parameters,
+                GdkAttachmentOption            option,
+                gint                           width,
+                gint                           height,
+                const GdkRectangle            *bounds,
+                gint                          *axis,
+                gint                          *value)
+{
+  gint a;
+  gint v;
+
+  g_return_val_if_fail (parameters, FALSE);
+  g_return_val_if_fail (parameters->has_attachment_rectangle, FALSE);
+
+  if (!parameters || !parameters->has_attachment_rectangle)
+    return FALSE;
+
+  if (!axis)
+    axis = &a;
+
+  if (!value)
+    value = &v;
+
+  switch (get_base_option (option, parameters->is_right_to_left))
+    {
+    case GDK_ATTACHMENT_END_OPTIONS:
+      g_warning ("%s (): unexpected GDK_ATTACHMENT_END_OPTIONS", G_STRFUNC);
+      return FALSE;
+
+    case GDK_ATTACHMENT_FORCE_FIRST_OPTION:
+      g_warning ("%s (): unexpected GDK_ATTACHMENT_FORCE_FIRST_OPTION", G_STRFUNC);
+      return FALSE;
+
+    case GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED:
+      g_warning ("%s (): unexpected GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED", G_STRFUNC);
+      return FALSE;
+
+    case GDK_ATTACHMENT_FORCE_LAST_OPTION:
+      g_warning ("%s (): unexpected GDK_ATTACHMENT_FORCE_LAST_OPTION", G_STRFUNC);
+      return FALSE;
+
+    case GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED:
+      g_warning ("%s (): unexpected GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED", G_STRFUNC);
+      return FALSE;
+
+    case GDK_ATTACHMENT_ATTACH_TOP_EDGE:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             - parameters->attachment_margin.top
+             + parameters->window_margin.bottom
+             + parameters->window_padding.bottom
+             - height;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_LEFT_EDGE:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             - parameters->attachment_margin.left
+             + parameters->window_margin.right
+             + parameters->window_padding.right
+             - width;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_RIGHT_EDGE:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width
+             + parameters->attachment_margin.right
+             - parameters->window_margin.left
+             - parameters->window_padding.left;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_BOTTOM_EDGE:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height
+             + parameters->attachment_margin.bottom
+             - parameters->window_margin.top
+             - parameters->window_padding.top;
+      break;
+
+    case GDK_ATTACHMENT_ALIGN_TOP_EDGES:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             - parameters->window_margin.top
+             - parameters->window_padding.top;
+      break;
+
+    case GDK_ATTACHMENT_ALIGN_LEFT_EDGES:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             - parameters->window_margin.left
+             - parameters->window_padding.left;
+      break;
+
+    case GDK_ATTACHMENT_ALIGN_RIGHT_EDGES:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width
+             + parameters->window_margin.right
+             + parameters->window_padding.right
+             - width;
+      break;
+
+    case GDK_ATTACHMENT_ALIGN_BOTTOM_EDGES:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height
+             + parameters->window_margin.bottom
+             + parameters->window_padding.bottom
+             - height;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_HORIZONTALLY:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width / 2
+             - parameters->window_margin.left
+             - parameters->window_padding.left
+             - (width - parameters->window_margin.left
+                      - parameters->window_margin.right
+                      - parameters->window_padding.left
+                      - parameters->window_padding.right) / 2;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_VERTICALLY:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height / 2
+             - parameters->window_margin.top
+             - parameters->window_padding.top
+             - (height - parameters->window_margin.top
+                       - parameters->window_margin.bottom
+                       - parameters->window_padding.top
+                       - parameters->window_padding.bottom) / 2;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_ON_TOP_EDGE:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             - parameters->window_margin.top
+             - parameters->window_padding.top
+             - (height - parameters->window_margin.top
+                       - parameters->window_margin.bottom
+                       - parameters->window_padding.top
+                       - parameters->window_padding.bottom) / 2;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_ON_LEFT_EDGE:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             - parameters->window_margin.left
+             - parameters->window_padding.left
+             - (width - parameters->window_margin.left
+                      - parameters->window_margin.right
+                      - parameters->window_padding.left
+                      - parameters->window_padding.right) / 2;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_ON_RIGHT_EDGE:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width
+             - parameters->window_margin.left
+             - parameters->window_padding.left
+             - (width - parameters->window_margin.left
+                      - parameters->window_margin.right
+                      - parameters->window_padding.left
+                      - parameters->window_padding.right) / 2;
+      break;
+
+    case GDK_ATTACHMENT_CENTER_ON_BOTTOM_EDGE:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height
+             - parameters->window_margin.top
+             - parameters->window_padding.top
+             - (height - parameters->window_margin.top
+                       - parameters->window_margin.bottom
+                       - parameters->window_padding.top
+                       - parameters->window_padding.bottom) / 2;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_ABOVE_CENTER:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height / 2
+             + parameters->window_margin.bottom
+             + parameters->window_padding.bottom
+             - height;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_BELOW_CENTER:
+      *axis = 1;
+      *value = parameters->attachment_origin.y
+             + parameters->attachment_rectangle.y
+             + parameters->attachment_rectangle.height / 2
+             - parameters->window_margin.top
+             - parameters->window_padding.top;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_LEFT_OF_CENTER:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width / 2
+             + parameters->window_margin.right
+             + parameters->window_padding.right
+             - width;
+      break;
+
+    case GDK_ATTACHMENT_ATTACH_RIGHT_OF_CENTER:
+      *axis = 0;
+      *value = parameters->attachment_origin.x
+             + parameters->attachment_rectangle.x
+             + parameters->attachment_rectangle.width / 2
+             - parameters->window_margin.left
+             - parameters->window_padding.left;
+      break;
+
+    default:
+      g_warning ("%s (): unknown option", G_STRFUNC);
+      return FALSE;
+    }
+
+  return !bounds || (*axis == 0 && bounds->x <= *value && *value + width <= bounds->x + bounds->width)
+                 || (*axis == 1 && bounds->y <= *value && *value + height <= bounds->y + bounds->height);
+}
+
+static void
+gdk_x11_window_set_attachment_parameters (GdkWindow                     *window,
+                                          const GdkAttachmentParameters *parameters)
+{
+  GdkScreen *screen;
+  gint x;
+  gint y;
+  gint monitor;
+  GdkRectangle bounds;
+  gint width;
+  gint height;
+  GList *i;
+  GList *j;
+  GList *k;
+  gint axis;
+  gboolean satisfiable;
+  GdkAttachmentOption first_satisfiable_primary_option[2];
+  GdkAttachmentOption last_satisfiable_primary_option[2];
+  GdkAttachmentOption first_satisfiable_secondary_option[2];
+  GdkAttachmentOption last_satisfiable_secondary_option[2];
+  GdkAttachmentOption primary_option;
+  GdkAttachmentOption secondary_option;
+  gint primary_axis;
+  gint secondary_axis;
+  gboolean primary_force;
+  gboolean secondary_force;
+  gint primary_value;
+  gint secondary_value;
+  GdkPoint position = { 0 };
+  GdkPoint offset = { 0 };
+
+  if (!parameters || !parameters->has_attachment_rectangle)
+    return;
+
+  screen = gdk_window_get_screen (window);
+  x = parameters->attachment_origin.x + parameters->attachment_rectangle.x + parameters->attachment_rectangle.width / 2;
+  y = parameters->attachment_origin.y + parameters->attachment_rectangle.y + parameters->attachment_rectangle.height / 2;
+  monitor = gdk_screen_get_monitor_at_point (screen, x, y);
+  gdk_screen_get_monitor_workarea (screen, monitor, &bounds);
+  width = gdk_window_get_width (window);
+  height = gdk_window_get_height (window);
+  first_satisfiable_primary_option[0] = GDK_ATTACHMENT_END_OPTIONS;
+  first_satisfiable_primary_option[1] = GDK_ATTACHMENT_END_OPTIONS;
+  last_satisfiable_primary_option[0] = GDK_ATTACHMENT_END_OPTIONS;
+  last_satisfiable_primary_option[1] = GDK_ATTACHMENT_END_OPTIONS;
+
+  for (i = parameters->primary_options; i; i = i->next)
+    {
+      primary_option = GPOINTER_TO_INT (i->data);
+      primary_force = FALSE;
+
+      if (primary_option == GDK_ATTACHMENT_END_OPTIONS)
+        {
+          g_warning ("%s (): unexpected GDK_ATTACHMENT_END_OPTIONS", G_STRFUNC);
+          i = NULL;
+          break;
+        }
+      else if (primary_option == GDK_ATTACHMENT_FORCE_FIRST_OPTION ||
+               primary_option == GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED)
+        {
+          g_warn_if_fail (primary_option != GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED);
+
+          if (first_satisfiable_primary_option[0] == GDK_ATTACHMENT_END_OPTIONS)
+            primary_option = GPOINTER_TO_INT (parameters->primary_options->data);
+          else
+            primary_option = first_satisfiable_primary_option[0];
+
+          primary_force = TRUE;
+        }
+      else if (primary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION ||
+               primary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED)
+        {
+          g_warn_if_fail (primary_option != GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED);
+
+          if (last_satisfiable_primary_option[0] == GDK_ATTACHMENT_END_OPTIONS)
+            {
+              if (!i->prev)
+                {
+                  g_warning ("%s (): started with GDK_ATTACHMENT_FORCE_LAST_OPTION", G_STRFUNC);
+                  continue;
+                }
+
+              primary_option = GPOINTER_TO_INT (i->prev->data);
+            }
+          else
+            primary_option = last_satisfiable_primary_option[0];
+
+          primary_force = TRUE;
+        }
+
+      satisfiable = is_satisfiable (parameters,
+                                    primary_option,
+                                    width,
+                                    height,
+                                    &bounds,
+                                    &primary_axis,
+                                    &primary_value);
+
+      if (satisfiable && primary_axis >= 0)
+        {
+          if (first_satisfiable_primary_option[0] == GDK_ATTACHMENT_END_OPTIONS)
+            first_satisfiable_primary_option[0] = primary_option;
+          else if (first_satisfiable_primary_option[1] == GDK_ATTACHMENT_END_OPTIONS &&
+                   primary_axis != get_axis (first_satisfiable_primary_option[0]))
+            first_satisfiable_primary_option[1] = primary_option;
+
+          if (last_satisfiable_primary_option[0] != GDK_ATTACHMENT_END_OPTIONS &&
+              primary_axis != last_satisfiable_primary_option[0])
+            last_satisfiable_primary_option[1] = last_satisfiable_primary_option[0];
+
+          last_satisfiable_primary_option[0] = primary_option;
+        }
+
+      if (satisfiable || primary_force)
+        {
+          first_satisfiable_secondary_option[0] = GDK_ATTACHMENT_END_OPTIONS;
+          first_satisfiable_secondary_option[1] = GDK_ATTACHMENT_END_OPTIONS;
+          last_satisfiable_secondary_option[0] = GDK_ATTACHMENT_END_OPTIONS;
+          last_satisfiable_secondary_option[1] = GDK_ATTACHMENT_END_OPTIONS;
+
+          for (j = parameters->secondary_options; j; j = j->next)
+            {
+              secondary_option = GPOINTER_TO_INT (j->data);
+              secondary_force = FALSE;
+              secondary_axis = get_axis (secondary_option);
+
+              if (secondary_axis >= 0 && secondary_axis == primary_axis)
+                continue;
+
+              if (secondary_option == GDK_ATTACHMENT_END_OPTIONS)
+                {
+                  g_warning ("%s (): unexpected GDK_ATTACHMENT_END_OPTIONS", G_STRFUNC);
+                  j = NULL;
+                  break;
+                }
+              else if (secondary_option == GDK_ATTACHMENT_FORCE_FIRST_OPTION ||
+                       secondary_option == GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED)
+                {
+                  if (secondary_option == GDK_ATTACHMENT_FORCE_FIRST_OPTION_IF_PRIMARY_FORCED && !primary_force)
+                    continue;
+
+                  axis = primary_axis == 0 ? 1 : (primary_axis == 1 ? 0 : -1);
+
+                  if (axis >= 0 && get_axis (first_satisfiable_secondary_option[0]) == axis)
+                    secondary_option = first_satisfiable_secondary_option[0];
+                  else if (axis >= 0 && get_axis (first_satisfiable_secondary_option[1]) == axis)
+                    secondary_option = first_satisfiable_secondary_option[1];
+                  else
+                    {
+                      for (k = parameters->secondary_options; k; k = k->next)
+                        {
+                          secondary_option = GPOINTER_TO_INT (k->data);
+                          secondary_axis = get_axis (secondary_option);
+
+                          if (secondary_axis >= 0 && secondary_axis != primary_axis)
+                            break;
+                        }
+
+                      if (!k)
+                        continue;
+                    }
+
+                  secondary_force = TRUE;
+                }
+              else if (secondary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION ||
+                       secondary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED)
+                {
+                  if (secondary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED && !primary_force)
+                    continue;
+
+                  axis = primary_axis == 0 ? 1 : (primary_axis == 1 ? 0 : -1);
+
+                  if (axis >= 0 && get_axis (last_satisfiable_secondary_option[0]) == axis)
+                    secondary_option = last_satisfiable_secondary_option[0];
+                  else if (axis >= 0 && get_axis (last_satisfiable_secondary_option[1]) == axis)
+                    secondary_option = last_satisfiable_secondary_option[1];
+                  else
+                    {
+                      if (!j->prev)
+                        {
+                          if (secondary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION)
+                            g_warning ("%s (): started with GDK_ATTACHMENT_FORCE_LAST_OPTION", G_STRFUNC);
+                          else if (secondary_option == GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED)
+                            g_warning ("%s (): started with GDK_ATTACHMENT_FORCE_LAST_OPTION_IF_PRIMARY_FORCED", G_STRFUNC);
+
+                          continue;
+                        }
+
+                      for (k = j->prev; k; k = k->prev)
+                        {
+                          secondary_option = GPOINTER_TO_INT (k->data);
+                          secondary_axis = get_axis (secondary_option);
+
+                          if (secondary_axis >= 0 && secondary_axis != primary_axis)
+                            break;
+                        }
+
+                      if (!k)
+                        continue;
+                    }
+
+                  secondary_force = TRUE;
+                }
+
+              satisfiable = is_satisfiable (parameters,
+                                            secondary_option,
+                                            width,
+                                            height,
+                                            &bounds,
+                                            &secondary_axis,
+                                            &secondary_value);
+
+              if (satisfiable && secondary_axis >= 0)
+                {
+                  if (first_satisfiable_secondary_option[0] == GDK_ATTACHMENT_END_OPTIONS)
+                    first_satisfiable_secondary_option[0] = secondary_option;
+                  else if (first_satisfiable_secondary_option[1] == GDK_ATTACHMENT_END_OPTIONS &&
+                           secondary_axis != get_axis (first_satisfiable_secondary_option[0]))
+                    first_satisfiable_secondary_option[1] = secondary_option;
+
+                  if (last_satisfiable_secondary_option[0] != GDK_ATTACHMENT_END_OPTIONS &&
+                      secondary_axis != last_satisfiable_secondary_option[0])
+                    last_satisfiable_secondary_option[1] = last_satisfiable_secondary_option[0];
+
+                  last_satisfiable_secondary_option[0] = secondary_option;
+                }
+
+              if (satisfiable || secondary_force)
+                {
+                  if (primary_axis == 0)
+                    {
+                      position.x = primary_value;
+                      position.y = secondary_value;
+                    }
+                  else
+                    {
+                      position.x = secondary_value;
+                      position.y = primary_value;
+                    }
+
+                  break;
+                }
+            }
+
+          if (j)
+            break;
+        }
+    }
+
+  if (i)
+    {
+      if (position.x + width > bounds.x + bounds.width)
+        {
+          offset.x += bounds.x + bounds.width - width - position.x;
+          position.x = bounds.x + bounds.width - width;
+        }
+
+      if (position.x < bounds.x)
+        {
+          offset.x += bounds.x - position.x;
+          position.x = bounds.x;
+        }
+
+      if (position.y + height > bounds.y + bounds.height)
+        {
+          offset.y += bounds.y + bounds.height - height - position.y;
+          position.y = bounds.y + bounds.height - height;
+        }
+
+      if (position.y < bounds.y)
+        {
+          offset.y += bounds.y - position.y;
+          position.y = bounds.y;
+        }
+
+      gdk_window_move (window, position.x, position.y);
+
+      if (parameters->position_callback)
+        parameters->position_callback (window,
+                                       primary_option,
+                                       secondary_option,
+                                       &position,
+                                       &offset,
+                                       parameters->position_callback_user_data);
+    }
+}
+
 static void
 gdk_window_impl_x11_class_init (GdkWindowImplX11Class *klass)
 {
@@ -5771,4 +6383,5 @@ gdk_window_impl_x11_class_init (GdkWindowImplX11Class *klass)
   impl_class->create_gl_context = gdk_x11_window_create_gl_context;
   impl_class->invalidate_for_new_frame = gdk_x11_window_invalidate_for_new_frame;
   impl_class->get_unscaled_size = gdk_x11_window_get_unscaled_size;
+  impl_class->set_attachment_parameters = gdk_x11_window_set_attachment_parameters;
 }
