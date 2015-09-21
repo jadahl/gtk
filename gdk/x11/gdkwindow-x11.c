@@ -6036,6 +6036,7 @@ gdk_x11_window_set_attachment_parameters (GdkWindow                     *window,
   gint secondary_value;
   GdkPoint position = { 0 };
   GdkPoint offset = { 0 };
+  GdkToplevelX11 *toplevel;
 
   if (!parameters || !parameters->has_attachment_rectangle)
     return;
@@ -6281,7 +6282,15 @@ gdk_x11_window_set_attachment_parameters (GdkWindow                     *window,
           position.y = bounds.y;
         }
 
-      gdk_window_move (window, position.x, position.y);
+      toplevel = _gdk_x11_window_get_toplevel (window);
+
+      if (toplevel && !toplevel->is_mapped)
+        {
+          toplevel->move_on_map = TRUE;
+          toplevel->initial_position = position;
+        }
+      else
+        gdk_window_move (window, position.x, position.y);
 
       if (parameters->position_callback)
         parameters->position_callback (window,
