@@ -31,6 +31,8 @@
 #include "gdkprivate-wayland.h"
 #include "gdkinternals.h"
 #include "gdkdeviceprivate.h"
+#include "gdkprivate-wayland.h"
+#include "xdg-shell-unstable-v6-client-protocol.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -100,8 +102,9 @@ struct _GdkWindowImplWayland
 
   struct wl_surface *surface;
 
-  struct xdg_surface *xdg_surface;
-  struct xdg_popup   *xdg_popup;
+  struct zxdg_surface_v6 *xdg_surface;
+  struct zxdg_toplevel_v6 *xdg_toplevel;
+  struct zxdg_popup_v6 *xdg_popup;
   struct gtk_surface *gtk_surface;
 
   struct wl_subsurface *subsurface;
@@ -154,6 +157,12 @@ struct _GdkWindowImplWayland
 
   cairo_region_t *opaque_region;
   cairo_region_t *input_region;
+
+  struct {
+    int width;
+    int height;
+    GdkWindowState state;
+  } pending_configure;
 };
 
 struct _GdkWindowImplWaylandClass
@@ -729,9 +738,9 @@ gdk_wayland_window_sync_parent (GdkWindow *window,
 {
   GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
   GdkWindowImplWayland *impl_parent = NULL;
-  struct xdg_surface *parent_surface;
+  struct zxdg_toplevel_v6 *parent_toplevel;
 
-  if (!impl->xdg_surface)
+  if (!impl->xdg_toplevel)
     return;
 
   if (impl->transient_for)
@@ -745,12 +754,12 @@ gdk_wayland_window_sync_parent (GdkWindow *window,
       if (!impl_parent->surface)
         return;
 
-      parent_surface = impl_parent->xdg_surface;
+      parent_toplevel = impl_parent->xdg_toplevel;
     }
   else
-    parent_surface = NULL;
+    parent_toplevel = NULL;
 
-  xdg_surface_set_parent (impl->xdg_surface, parent_surface);
+  zxdg_toplevel_v6_set_parent (impl->xdg_toplevel, parent_toplevel);
 }
 
 static void
@@ -783,13 +792,13 @@ gdk_wayland_window_sync_title (GdkWindow *window)
 {
   GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
 
-  if (!impl->xdg_surface)
+  if (!impl->xdg_toplevel)
     return;
 
   if (!impl->title)
     return;
 
-  xdg_surface_set_title (impl->xdg_surface, impl->title);
+  zxdg_toplevel_v6_set_title (impl->xdg_toplevel, impl->title);
 }
 
 static void
@@ -806,7 +815,7 @@ gdk_wayland_window_sync_margin (GdkWindow *window)
   width = window->width - (impl->margin_left + impl->margin_right);
   height = window->height - (impl->margin_top + impl->margin_bottom);
 
-  xdg_surface_set_window_geometry (impl->xdg_surface, x, y, width, height);
+  zxdg_surface_v6_set_window_geometry (impl->xdg_surface, x, y, width, height);
 }
 
 static struct wl_region *
@@ -969,41 +978,24 @@ gdk_wayland_window_create_surface (GdkWindow *window)
 }
 
 static void
-xdg_surface_configure (void               *data,
-                       struct xdg_surface *xdg_surface,
-                       int32_t             width,
-                       int32_t             height,
-                       struct wl_array    *states,
-                       uint32_t            serial)
+xdg_surface_configure (void                   *data,
+                       struct zxdg_surface_v6 *xdg_surface,
+                       uint32_t                serial)
 {
   GdkWindow *window = GDK_WINDOW (data);
   GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
-  GdkWindowState new_state = 0;
-  uint32_t *p;
+  int width = impl->pending_configure.width;
+  int height = impl->pending_configure.height;
+  GdkWindowState new_state = impl->pending_configure.state;
 
-  wl_array_for_each (p, states)
+  /* xdg_popup configuration aren't handled yet so just pretend we listened. */
+  if (impl->xdg_popup)
     {
-      uint32_t state = *p;
-      switch (state)
-        {
-        case XDG_SURFACE_STATE_FULLSCREEN:
-          new_state |= GDK_WINDOW_STATE_FULLSCREEN;
-          break;
-        case XDG_SURFACE_STATE_MAXIMIZED:
-          new_state |= GDK_WINDOW_STATE_MAXIMIZED;
-          break;
-        case XDG_SURFACE_STATE_ACTIVATED:
-          new_state |= GDK_WINDOW_STATE_FOCUSED;
-          break;
-        case XDG_SURFACE_STATE_RESIZING:
-          break;
-        default:
-          /* Unknown state */
-          break;
-        }
+      zxdg_surface_v6_ack_configure (xdg_surface, serial);
+      return;
     }
 
-   if (width > 0 && height > 0)
+  if (width > 0 && height > 0)
     {
       GdkWindowHints geometry_mask = impl->geometry_mask;
 
@@ -1030,15 +1022,57 @@ xdg_surface_configure (void               *data,
 
   _gdk_set_window_state (window, new_state);
   gdk_wayland_window_sync_margin (window);
-  xdg_surface_ack_configure (xdg_surface, serial);
+  zxdg_surface_v6_ack_configure (xdg_surface, serial);
   if (impl->hint != GDK_WINDOW_TYPE_HINT_DIALOG &&
       new_state & GDK_WINDOW_STATE_FOCUSED)
     gdk_wayland_window_update_dialogs (window);
 }
 
+static const struct zxdg_surface_v6_listener xdg_surface_listener = {
+  xdg_surface_configure,
+};
+
 static void
-xdg_surface_close (void               *data,
-                   struct xdg_surface *xdg_surface)
+xdg_toplevel_configure (void                    *data,
+                        struct zxdg_toplevel_v6 *xdg_toplevel,
+                        int32_t                  width,
+                        int32_t                  height,
+                        struct wl_array         *states)
+{
+  GdkWindow *window = GDK_WINDOW (data);
+  GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
+  uint32_t *p;
+
+  impl->pending_configure.state = 0;
+  wl_array_for_each (p, states)
+    {
+      uint32_t state = *p;
+      switch (state)
+        {
+        case ZXDG_TOPLEVEL_V6_STATE_FULLSCREEN:
+          impl->pending_configure.state |= GDK_WINDOW_STATE_FULLSCREEN;
+          break;
+        case ZXDG_TOPLEVEL_V6_STATE_MAXIMIZED:
+          impl->pending_configure.state |= GDK_WINDOW_STATE_MAXIMIZED;
+          break;
+        case ZXDG_TOPLEVEL_V6_STATE_ACTIVATED:
+          impl->pending_configure.state |= GDK_WINDOW_STATE_FOCUSED;
+          break;
+        case ZXDG_TOPLEVEL_V6_STATE_RESIZING:
+          break;
+        default:
+          /* Unknown state */
+          break;
+        }
+    }
+
+  impl->pending_configure.width = width;
+  impl->pending_configure.height = height;
+}
+
+static void
+xdg_toplevel_close (void                    *data,
+                    struct zxdg_toplevel_v6 *xdg_toplevel)
 {
   GdkWindow *window = GDK_WINDOW (data);
   GdkDisplay *display;
@@ -1055,13 +1089,13 @@ xdg_surface_close (void               *data,
   _gdk_wayland_display_deliver_event (display, event);
 }
 
-static const struct xdg_surface_listener xdg_surface_listener = {
-  xdg_surface_configure,
-  xdg_surface_close,
+static const struct zxdg_toplevel_v6_listener xdg_toplevel_listener = {
+  xdg_toplevel_configure,
+  xdg_toplevel_close,
 };
 
 static void
-gdk_wayland_window_create_xdg_surface (GdkWindow *window)
+gdk_wayland_window_create_xdg_toplevel (GdkWindow *window)
 {
   GdkWaylandDisplay *display_wayland = GDK_WAYLAND_DISPLAY (gdk_window_get_display (window));
   GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
@@ -1072,23 +1106,31 @@ gdk_wayland_window_create_xdg_surface (GdkWindow *window)
       impl->initial_fullscreen_monitor < gdk_screen_get_n_monitors (screen))
       fullscreen_output = _gdk_wayland_screen_get_wl_output (screen, impl->initial_fullscreen_monitor);
 
-  impl->xdg_surface = xdg_shell_get_xdg_surface (display_wayland->xdg_shell, impl->surface);
-  xdg_surface_add_listener (impl->xdg_surface, &xdg_surface_listener, window);
+  impl->xdg_surface = zxdg_shell_v6_get_xdg_surface (display_wayland->xdg_shell,
+                                                     impl->surface);
+  zxdg_surface_v6_add_listener (impl->xdg_surface,
+                                &xdg_surface_listener,
+                                window);
+
+  impl->xdg_toplevel = zxdg_surface_v6_get_toplevel (impl->xdg_surface);
+  zxdg_toplevel_v6_add_listener (impl->xdg_toplevel,
+                                 &xdg_toplevel_listener,
+                                 window);
 
   gdk_wayland_window_sync_parent (window, NULL);
   gdk_wayland_window_sync_title (window);
   gdk_wayland_window_sync_margin (window);
 
   if (window->state & GDK_WINDOW_STATE_MAXIMIZED)
-    xdg_surface_set_maximized (impl->xdg_surface);
+    zxdg_toplevel_v6_set_maximized (impl->xdg_toplevel);
   if (window->state & GDK_WINDOW_STATE_FULLSCREEN)
-    xdg_surface_set_fullscreen (impl->xdg_surface, fullscreen_output);
+    zxdg_toplevel_v6_set_fullscreen (impl->xdg_toplevel, fullscreen_output);
 
   app_id = g_get_prgname ();
   if (app_id == NULL)
     app_id = gdk_get_program_class ();
 
-  xdg_surface_set_app_id (impl->xdg_surface, app_id);
+  zxdg_toplevel_v6_set_app_id (impl->xdg_toplevel, app_id);
 
   maybe_set_gtk_surface_dbus_properties (window);
   maybe_set_gtk_surface_modal (window);
@@ -1098,8 +1140,8 @@ gdk_wayland_window_create_xdg_surface (GdkWindow *window)
 }
 
 static void
-xdg_popup_done (void             *data,
-                struct xdg_popup *xdg_popup)
+xdg_popup_done (void                 *data,
+                struct zxdg_popup_v6 *xdg_popup)
 {
   GdkWindow *window = GDK_WINDOW (data);
 
@@ -1109,7 +1151,7 @@ xdg_popup_done (void             *data,
   gdk_window_hide (window);
 }
 
-static const struct xdg_popup_listener xdg_popup_listener = {
+static const struct zxdg_popup_v6_listener xdg_popup_listener = {
   xdg_popup_done,
 };
 
@@ -1180,11 +1222,12 @@ gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
   GdkSeat *gdk_seat;
   int x, y;
   int parent_x, parent_y;
+  uint32_t serial;
 
   if (!impl->surface)
     return;
 
-  if (!parent_impl->surface)
+  if (!parent_impl->xdg_surface)
     return;
 
   gdk_seat = gdk_display_get_default_seat (GDK_DISPLAY (display));
@@ -1195,14 +1238,19 @@ gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
   x = window->x - parent_x;
   y = window->y - parent_y;
 
-  impl->xdg_popup = xdg_shell_get_xdg_popup (display->xdg_shell,
-                                             impl->surface,
-                                             parent_impl->surface,
-                                             seat,
-                                             _gdk_wayland_device_get_last_implicit_grab_serial (device, NULL),
-                                             x, y);
+  impl->xdg_surface = zxdg_shell_v6_get_xdg_surface (display->xdg_shell,
+                                                     impl->surface);
+  zxdg_surface_v6_add_listener (impl->xdg_surface,
+                                &xdg_surface_listener,
+                                window);
 
-  xdg_popup_add_listener (impl->xdg_popup, &xdg_popup_listener, window);
+  serial = _gdk_wayland_device_get_last_implicit_grab_serial (device, NULL);
+  impl->xdg_popup = zxdg_surface_v6_get_popup (impl->xdg_surface,
+                                               parent_impl->xdg_surface,
+                                               seat,
+                                               serial,
+                                               x, y);
+  zxdg_popup_v6_add_listener (impl->xdg_popup, &xdg_popup_listener, window);
 }
 
 static struct wl_seat *
@@ -1345,7 +1393,7 @@ should_map_as_subsurface (GdkWindow *window)
   return FALSE;
 }
 
-/* Get the window that can be used as a parent for a popup, i.e. a xdg_surface
+/* Get the window that can be used as a parent for a popup, i.e. a xdg_toplevel
  * or xdg_popup. If the window is not, traverse up the transiency parents until
  * we find one.
  */
@@ -1356,7 +1404,7 @@ get_popup_parent (GdkWindow *window)
     {
       GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
 
-      if (impl->xdg_popup || impl->xdg_surface)
+      if (impl->xdg_popup || impl->xdg_toplevel)
         return window;
 
       window = impl->transient_for;
@@ -1470,12 +1518,12 @@ gdk_wayland_window_map (GdkWindow *window)
         }
       else
         {
-          gdk_wayland_window_create_xdg_surface (window);
+          gdk_wayland_window_create_xdg_toplevel (window);
         }
     }
   else
     {
-      gdk_wayland_window_create_xdg_surface (window);
+      gdk_wayland_window_create_xdg_toplevel (window);
     }
 
   impl->mapped = TRUE;
@@ -1548,15 +1596,20 @@ gdk_wayland_window_hide_surface (GdkWindow *window)
           impl->egl_window = NULL;
         }
 
-      if (impl->xdg_surface)
+      if (impl->xdg_toplevel)
         {
-          xdg_surface_destroy (impl->xdg_surface);
-          impl->xdg_surface = NULL;
+          zxdg_toplevel_v6_destroy (impl->xdg_toplevel);
+          impl->xdg_toplevel = NULL;
         }
       else if (impl->xdg_popup)
         {
-          xdg_popup_destroy (impl->xdg_popup);
+          zxdg_popup_v6_destroy (impl->xdg_popup);
           impl->xdg_popup = NULL;
+        }
+      if (impl->xdg_surface)
+        {
+          zxdg_surface_v6_destroy (impl->xdg_surface);
+          impl->xdg_surface = NULL;
         }
 
       if (impl->subsurface)
@@ -2112,10 +2165,10 @@ gdk_wayland_window_iconify (GdkWindow *window)
       !WINDOW_IS_TOPLEVEL_OR_FOREIGN (window))
     return;
 
-  if (!impl->xdg_surface)
+  if (!impl->xdg_toplevel)
     return;
 
-  xdg_surface_set_minimized (impl->xdg_surface);
+  zxdg_toplevel_v6_set_minimized (impl->xdg_toplevel);
 }
 
 static void
@@ -2150,8 +2203,8 @@ gdk_wayland_window_maximize (GdkWindow *window)
   if (GDK_WINDOW_DESTROYED (window))
     return;
 
-  if (impl->xdg_surface)
-    xdg_surface_set_maximized (impl->xdg_surface);
+  if (impl->xdg_toplevel)
+    zxdg_toplevel_v6_set_maximized (impl->xdg_toplevel);
   else
     gdk_synthesize_window_state (window, 0, GDK_WINDOW_STATE_MAXIMIZED);
 }
@@ -2164,8 +2217,8 @@ gdk_wayland_window_unmaximize (GdkWindow *window)
   if (GDK_WINDOW_DESTROYED (window))
     return;
 
-  if (impl->xdg_surface)
-    xdg_surface_unset_maximized (impl->xdg_surface);
+  if (impl->xdg_toplevel)
+    zxdg_toplevel_v6_unset_maximized (impl->xdg_toplevel);
   else
     gdk_synthesize_window_state (window, GDK_WINDOW_STATE_MAXIMIZED, 0);
 }
@@ -2181,8 +2234,8 @@ gdk_wayland_window_fullscreen_on_monitor (GdkWindow *window, gint monitor)
   if (GDK_WINDOW_DESTROYED (window))
     return;
 
-  if (impl->xdg_surface)
-    xdg_surface_set_fullscreen (impl->xdg_surface, fullscreen_output);
+  if (impl->xdg_toplevel)
+    zxdg_toplevel_v6_set_fullscreen (impl->xdg_toplevel, fullscreen_output);
   else {
     gdk_synthesize_window_state (window, 0, GDK_WINDOW_STATE_FULLSCREEN);
     impl->initial_fullscreen_monitor = monitor;
@@ -2199,8 +2252,8 @@ gdk_wayland_window_fullscreen (GdkWindow *window)
 
   impl->initial_fullscreen_monitor = -1;
 
-  if (impl->xdg_surface)
-    xdg_surface_set_fullscreen (impl->xdg_surface, NULL);
+  if (impl->xdg_toplevel)
+    zxdg_toplevel_v6_set_fullscreen (impl->xdg_toplevel, NULL);
   else
     gdk_synthesize_window_state (window, 0, GDK_WINDOW_STATE_FULLSCREEN);
 }
@@ -2215,8 +2268,8 @@ gdk_wayland_window_unfullscreen (GdkWindow *window)
 
   impl->initial_fullscreen_monitor = -1;
 
-  if (impl->xdg_surface)
-    xdg_surface_unset_fullscreen (impl->xdg_surface);
+  if (impl->xdg_toplevel)
+    zxdg_toplevel_v6_unset_fullscreen (impl->xdg_toplevel);
   else
     gdk_synthesize_window_state (window, GDK_WINDOW_STATE_FULLSCREEN, 0);
 }
@@ -2282,35 +2335,35 @@ gdk_wayland_window_begin_resize_drag (GdkWindow     *window,
   switch (edge)
     {
     case GDK_WINDOW_EDGE_NORTH_WEST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_TOP_LEFT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP_LEFT;
       break;
 
     case GDK_WINDOW_EDGE_NORTH:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_TOP;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP;
       break;
 
     case GDK_WINDOW_EDGE_NORTH_EAST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_TOP_RIGHT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP_RIGHT;
       break;
 
     case GDK_WINDOW_EDGE_WEST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_LEFT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_LEFT;
       break;
 
     case GDK_WINDOW_EDGE_EAST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_RIGHT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_RIGHT;
       break;
 
     case GDK_WINDOW_EDGE_SOUTH_WEST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_BOTTOM_LEFT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM_LEFT;
       break;
 
     case GDK_WINDOW_EDGE_SOUTH:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_BOTTOM;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM;
       break;
 
     case GDK_WINDOW_EDGE_SOUTH_EAST:
-      resize_edges = XDG_SURFACE_RESIZE_EDGE_BOTTOM_RIGHT;
+      resize_edges = ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM_RIGHT;
       break;
 
     default:
@@ -2326,9 +2379,9 @@ gdk_wayland_window_begin_resize_drag (GdkWindow     *window,
   serial = _gdk_wayland_device_get_last_implicit_grab_serial (GDK_WAYLAND_DEVICE (device),
                                                               &sequence);
 
-  xdg_surface_resize (impl->xdg_surface,
-                      gdk_wayland_device_get_wl_seat (device),
-                      serial, resize_edges);
+  zxdg_toplevel_v6_resize (impl->xdg_toplevel,
+                           gdk_wayland_device_get_wl_seat (device),
+                           serial, resize_edges);
 
   if (sequence)
     gdk_wayland_device_unset_touch_grab (device, sequence);
@@ -2362,9 +2415,9 @@ gdk_wayland_window_begin_move_drag (GdkWindow *window,
 
   serial = _gdk_wayland_device_get_last_implicit_grab_serial (GDK_WAYLAND_DEVICE (device),
                                                               &sequence);
-  xdg_surface_move (impl->xdg_surface,
-                    gdk_wayland_device_get_wl_seat (device),
-                    serial);
+  zxdg_toplevel_v6_move (impl->xdg_toplevel,
+                         gdk_wayland_device_get_wl_seat (device),
+                         serial);
   if (sequence)
     gdk_wayland_device_unset_touch_grab (device, sequence);
 
@@ -2521,6 +2574,7 @@ gdk_wayland_window_show_window_menu (GdkWindow *window,
   struct wl_seat *seat;
   GdkWaylandDevice *device;
   double x, y;
+  uint32_t serial;
 
   switch (event->type)
     {
@@ -2540,10 +2594,8 @@ gdk_wayland_window_show_window_menu (GdkWindow *window,
   seat = gdk_wayland_device_get_wl_seat (GDK_DEVICE (device));
   gdk_event_get_coords (event, &x, &y);
 
-  xdg_surface_show_window_menu (impl->xdg_surface,
-                                seat,
-                                _gdk_wayland_device_get_implicit_grab_serial (device, event),
-                                x, y);
+  serial = _gdk_wayland_device_get_implicit_grab_serial (device, event);
+  zxdg_toplevel_v6_show_window_menu (impl->xdg_toplevel, seat, serial, x, y);
   return TRUE;
 }
 
