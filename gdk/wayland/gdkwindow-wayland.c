@@ -1251,6 +1251,8 @@ gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
                                                serial,
                                                x, y);
   zxdg_popup_v6_add_listener (impl->xdg_popup, &xdg_popup_listener, window);
+
+  gdk_wayland_window_sync_margin (window);
 }
 
 static struct wl_seat *
