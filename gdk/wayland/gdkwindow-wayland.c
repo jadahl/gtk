@@ -32,6 +32,7 @@
 #include "gdkinternals.h"
 #include "gdkdeviceprivate.h"
 #include "gdkprivate-wayland.h"
+#include "gdkattachparamsprivate.h"
 #include "xdg-shell-unstable-v6-client-protocol.h"
 
 #include <stdlib.h>
@@ -163,6 +164,8 @@ struct _GdkWindowImplWayland
     int height;
     GdkWindowState state;
   } pending_configure;
+
+  GdkAttachParams *attach_params;
 };
 
 struct _GdkWindowImplWaylandClass
@@ -707,6 +710,8 @@ gdk_window_impl_wayland_finalize (GObject *object)
   g_clear_pointer (&impl->opaque_region, cairo_region_destroy);
   g_clear_pointer (&impl->input_region, cairo_region_destroy);
 
+  g_clear_object (&impl->attach_params);
+
   G_OBJECT_CLASS (_gdk_window_impl_wayland_parent_class)->finalize (object);
 }
 
@@ -1140,6 +1145,14 @@ gdk_wayland_window_create_xdg_toplevel (GdkWindow *window)
 }
 
 static void
+xdg_popup_configure (void                 *data,
+                     struct zxdg_popup_v6 *xdg_popup,
+                     int                   x,
+                     int                   y)
+{
+}
+
+static void
 xdg_popup_done (void                 *data,
                 struct zxdg_popup_v6 *xdg_popup)
 {
@@ -1152,6 +1165,7 @@ xdg_popup_done (void                 *data,
 }
 
 static const struct zxdg_popup_v6_listener xdg_popup_listener = {
+  xdg_popup_configure,
   xdg_popup_done,
 };
 
@@ -1210,6 +1224,131 @@ gdk_wayland_window_get_fake_root_coords (GdkWindow *window,
   *y_out = y_offset;
 }
 
+static uint32_t
+attach_anchor_to_anchor (GdkAttachAnchor attach_anchor)
+{
+  switch (attach_anchor)
+    {
+    case GDK_ATTACH_TOP_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT | ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_TOP:
+      return ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_TOP_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT | ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT;
+    case GDK_ATTACH_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT;
+    case GDK_ATTACH_BOTTOM_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT | ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_BOTTOM:
+      return ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_BOTTOM_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT | ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_CENTER:
+      return ZXDG_POSITIONER_V6_ANCHOR_NONE;
+    }
+
+  g_assert_not_reached ();
+}
+
+static uint32_t
+window_anchor_to_gravity (GdkAttachAnchor window_anchor)
+{
+  switch (window_anchor)
+    {
+    case GDK_ATTACH_TOP_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT | ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_TOP:
+      return ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_TOP_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT | ZXDG_POSITIONER_V6_ANCHOR_BOTTOM;
+    case GDK_ATTACH_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT;
+    case GDK_ATTACH_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT;
+    case GDK_ATTACH_BOTTOM_LEFT:
+      return ZXDG_POSITIONER_V6_ANCHOR_RIGHT | ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_BOTTOM:
+      return ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_BOTTOM_RIGHT:
+      return ZXDG_POSITIONER_V6_ANCHOR_LEFT | ZXDG_POSITIONER_V6_ANCHOR_TOP;
+    case GDK_ATTACH_CENTER:
+      return ZXDG_POSITIONER_V6_ANCHOR_NONE;
+    }
+
+  g_assert_not_reached ();
+}
+
+static void
+apply_attach_params_to_xdg_positioner (GdkWindow                 *window,
+                                       GdkAttachParams           *attach_params,
+                                       struct zxdg_positioner_v6 *xdg_positioner)
+{
+  GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
+  GdkRectangle anchor_rect;
+  uint32_t anchor;
+  uint32_t gravity;
+  uint32_t constrain_action;
+  GdkWindowImplWayland *parent_impl;
+
+  g_assert (attach_params->has_attach_rect);
+  g_assert (attach_params->rect_parent || impl->transient_for);
+
+
+  /* Anchor rect should be relative the window geometry of the parent. */
+  parent_impl = GDK_WINDOW_IMPL_WAYLAND (attach_params->rect_parent->impl);
+  anchor_rect = attach_params->attach_rect;
+  anchor_rect.x -= parent_impl->margin_left;
+  anchor_rect.y -= parent_impl->margin_top;
+
+  zxdg_positioner_v6_set_anchor_rect (xdg_positioner,
+                                      anchor_rect.x, anchor_rect.y,
+                                      anchor_rect.width, anchor_rect.height);
+
+  anchor = attach_anchor_to_anchor (attach_params->rect_anchor);
+  zxdg_positioner_v6_set_anchor (xdg_positioner, anchor);
+
+  gravity = window_anchor_to_gravity (attach_params->window_anchor);
+  zxdg_positioner_v6_set_gravity (xdg_positioner, gravity);
+
+  constrain_action = ZXDG_POSITIONER_V6_CONSTRAIN_ACTION_NONE;
+  if (attach_params->attach_hints & GDK_ATTACH_FLIP_LEFT_RIGHT)
+    constrain_action |= ZXDG_POSITIONER_V6_CONSTRAIN_ACTION_FLIP_X;
+  else
+    constrain_action |= ZXDG_POSITIONER_V6_CONSTRAIN_ACTION_SLIDE_X;
+  if (attach_params->attach_hints & GDK_ATTACH_FLIP_TOP_BOTTOM)
+    constrain_action |= ZXDG_POSITIONER_V6_CONSTRAIN_ACTION_FLIP_Y;
+  else
+    constrain_action |= ZXDG_POSITIONER_V6_CONSTRAIN_ACTION_SLIDE_Y;
+  zxdg_positioner_v6_set_constrain_action (xdg_positioner, constrain_action);
+
+  zxdg_positioner_v6_set_offset (xdg_positioner,
+                                 attach_params->offset_x,
+                                 attach_params->offset_y);
+}
+
+static void
+apply_explicit_position_to_xdg_positioner (GdkWindow                 *window,
+                                           GdkWindow                 *parent,
+                                           struct zxdg_positioner_v6 *xdg_positioner)
+{
+  int x, y, parent_x, parent_y;
+
+  gdk_wayland_window_get_fake_root_coords (parent, &parent_x, &parent_y);
+  x = window->x - parent_x;
+  y = window->y - parent_y;
+
+  zxdg_positioner_v6_set_anchor_rect (xdg_positioner,
+                                      x, y, 1, 1);
+  zxdg_positioner_v6_set_anchor (xdg_positioner,
+                                 ZXDG_POSITIONER_V6_ANCHOR_TOP |
+                                 ZXDG_POSITIONER_V6_ANCHOR_LEFT);
+  zxdg_positioner_v6_set_gravity (xdg_positioner,
+                                  ZXDG_POSITIONER_V6_GRAVITY_BOTTOM |
+                                  ZXDG_POSITIONER_V6_GRAVITY_RIGHT);
+}
+
 static void
 gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
                                      GdkWindow      *parent,
@@ -1220,8 +1359,7 @@ gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
   GdkWindowImplWayland *parent_impl = GDK_WINDOW_IMPL_WAYLAND (parent->impl);
   GdkWaylandDevice *device;
   GdkSeat *gdk_seat;
-  int x, y;
-  int parent_x, parent_y;
+  struct zxdg_positioner_v6 *xdg_positioner;
   uint32_t serial;
 
   if (!impl->surface)
@@ -1233,24 +1371,34 @@ gdk_wayland_window_create_xdg_popup (GdkWindow      *window,
   gdk_seat = gdk_display_get_default_seat (GDK_DISPLAY (display));
   device = GDK_WAYLAND_DEVICE (gdk_seat_get_pointer (gdk_seat));
 
-  gdk_wayland_window_get_fake_root_coords (parent, &parent_x, &parent_y);
-
-  x = window->x - parent_x;
-  y = window->y - parent_y;
-
   impl->xdg_surface = zxdg_shell_v6_get_xdg_surface (display->xdg_shell,
                                                      impl->surface);
   zxdg_surface_v6_add_listener (impl->xdg_surface,
                                 &xdg_surface_listener,
                                 window);
 
+  xdg_positioner = zxdg_shell_v6_create_positioner (display->xdg_shell);
+  if (impl->attach_params)
+    {
+      apply_attach_params_to_xdg_positioner (window,
+                                             impl->attach_params,
+                                             xdg_positioner);
+    }
+  else
+    {
+      apply_explicit_position_to_xdg_positioner (window,
+                                                 parent,
+                                                 xdg_positioner);
+    }
+
   serial = _gdk_wayland_device_get_last_implicit_grab_serial (device, NULL);
   impl->xdg_popup = zxdg_surface_v6_get_popup (impl->xdg_surface,
                                                parent_impl->xdg_surface,
                                                seat,
                                                serial,
-                                               x, y);
+                                               xdg_positioner);
   zxdg_popup_v6_add_listener (impl->xdg_popup, &xdg_popup_listener, window);
+  zxdg_positioner_v6_destroy (xdg_positioner);
 
   gdk_wayland_window_sync_margin (window);
 }
@@ -2602,6 +2750,15 @@ gdk_wayland_window_show_window_menu (GdkWindow *window,
 }
 
 static void
+gdk_wayland_window_move_using_params (GdkWindow       *window,
+                                      GdkAttachParams *params)
+{
+  GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
+
+  g_set_object (&impl->attach_params, params);
+}
+
+static void
 _gdk_window_impl_wayland_class_init (GdkWindowImplWaylandClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
@@ -2691,6 +2848,7 @@ _gdk_window_impl_wayland_class_init (GdkWindowImplWaylandClass *klass)
   impl_class->show_window_menu = gdk_wayland_window_show_window_menu;
   impl_class->create_gl_context = gdk_wayland_window_create_gl_context;
   impl_class->invalidate_for_new_frame = gdk_wayland_window_invalidate_for_new_frame;
+  impl_class->move_using_params = gdk_wayland_window_move_using_params;
 
   signals[COMMITTED] = g_signal_new ("committed",
                                      G_TYPE_FROM_CLASS (object_class),
