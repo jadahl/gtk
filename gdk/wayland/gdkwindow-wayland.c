@@ -1285,22 +1285,36 @@ apply_attach_params_to_xdg_positioner (GdkWindow                 *window,
                                        GdkAttachParams           *attach_params,
                                        struct zxdg_positioner_v6 *xdg_positioner)
 {
-  GdkWindowImplWayland *impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
   GdkRectangle anchor_rect;
   uint32_t anchor;
   uint32_t gravity;
   uint32_t constrain_action;
   GdkWindowImplWayland *parent_impl;
+  GdkWindow *parent;
+  double x = 0, y = 0;
 
   g_assert (attach_params->has_attach_rect);
-  g_assert (attach_params->rect_parent || impl->transient_for);
+  g_assert (attach_params->rect_parent);
 
+  parent = attach_params->rect_parent;
+  while (TRUE)
+    {
+      gdk_window_coords_to_parent (parent, x, y, &x, &y);
+
+      if (gdk_window_has_native (parent))
+        break;
+
+      parent = gdk_window_get_parent (parent);
+      g_assert (parent);
+    }
 
   /* Anchor rect should be relative the window geometry of the parent. */
-  parent_impl = GDK_WINDOW_IMPL_WAYLAND (attach_params->rect_parent->impl);
+  parent_impl = GDK_WINDOW_IMPL_WAYLAND (parent->impl);
   anchor_rect = attach_params->attach_rect;
   anchor_rect.x -= parent_impl->margin_left;
   anchor_rect.y -= parent_impl->margin_top;
+  anchor_rect.x += (int) x;
+  anchor_rect.y += (int) y;
 
   zxdg_positioner_v6_set_anchor_rect (xdg_positioner,
                                       anchor_rect.x, anchor_rect.y,
