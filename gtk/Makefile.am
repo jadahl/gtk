@@ -755,6 +755,13 @@ gtk_base_c_sources = 		\
 	gtkfontchooserdialog.c	\
 	gtkfontchooserutils.c	\
 	gtkfontchooserwidget.c	\
+	gtkforeign.c		\
+	gtkforeign.h		\
+	gtkforeignexported.c	\
+	gtkforeignexported.h	\
+	gtkforeignimpl.c	\
+	gtkforeignimpl.h	\
+	gtkforeignprivate.h	\
 	gtkframe.c		\
 	gtkgladecatalog.c	\
 	gtkgesture.c		\
@@ -1005,7 +1012,11 @@ gtk_use_x11_c_sources = 	\
 	gtkxembed.c		\
 	deprecated/gtktrayicon-x11.c	\
 	gtkapplication-x11.c	\
-	gtkmountoperation-x11.c
+	gtkmountoperation-x11.c	\
+	gtkforeignexported-x11.c\
+	gtkforeignexported-x11.h\
+	gtkforeignimpl-x11.c	\
+	gtkforeignimpl-x11.h
 
 gtk_use_wayland_c_sources = \
 	gtkapplication-wayland.c
