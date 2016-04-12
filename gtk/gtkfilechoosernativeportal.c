@@ -57,6 +57,7 @@ typedef struct {
 
   gboolean hidden;
 
+  gulong window_exported_handler_id;
   GtkForeign *foreign;
   GtkForeignExported *exported;
 } FilechooserPortalData;
@@ -236,6 +237,17 @@ show_portal_file_chooser (GtkFileChooserNative *self,
                                              data);
 }
 
+static void
+window_exported (GtkForeignExported   *exported,
+                 GtkFileChooserNative *self)
+{
+  char *parent_window_str;
+
+  parent_window_str = _gtk_foreign_exported_get_handle_str (exported);
+  show_portal_file_chooser (self, parent_window_str);
+  g_free (parent_window_str);
+}
+
 gboolean
 gtk_file_chooser_native_portal_show (GtkFileChooserNative *self)
 {
@@ -288,8 +300,17 @@ gtk_file_chooser_native_portal_show (GtkFileChooserNative *self)
       char *parent_window_str;
 
       parent_window_str = _gtk_foreign_exported_get_handle_str (data->exported);
-      show_portal_file_chooser (self, parent_window_str);
-      g_free (parent_window_str);
+      if (parent_window_str)
+        {
+          show_portal_file_chooser (self, parent_window_str);
+          g_free (parent_window_str);
+        }
+      else
+        {
+          data->window_exported_handler_id =
+            g_signal_connect (data->exported, "window-exported",
+                              G_CALLBACK (window_exported), self);
+        }
     }
   else
     {

@@ -26,6 +26,10 @@
 
 #include "gtkforeignprivate.h"
 
+#ifdef GDK_WINDOWING_WAYLAND
+#include "gtkforeignimpl-wayland.h"
+#include "wayland/gdkwayland.h"
+#endif
 #ifdef GDK_WINDOWING_X11
 #include "gtkforeignimpl-x11.h"
 #include "x11/gdkx.h"
@@ -44,6 +48,10 @@ _gtk_foreign_create_impl (GtkForeign *foreign)
   GtkForeignImpl *impl = NULL;
   GtkForeignImplPrivate *priv;
 
+#ifdef GDK_WINDOWING_WAYLAND
+  if (GDK_IS_WAYLAND_DISPLAY (_gtk_foreign_get_gdk_display (foreign)))
+    impl = g_object_new (GTK_FOREIGN_TYPE_IMPL_WAYLAND, NULL);
+#endif
 #ifdef GDK_WINDOWING_X11
   if (GDK_IS_X11_DISPLAY (_gtk_foreign_get_gdk_display (foreign)))
     impl = g_object_new (GTK_FOREIGN_TYPE_IMPL_X11, NULL);

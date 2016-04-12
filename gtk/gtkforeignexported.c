@@ -26,6 +26,17 @@
 
 #include "gtkforeignexported.h"
 
+#include "gtkintl.h"
+
+enum
+{
+  WINDOW_EXPORTED,
+
+  LAST_SIGNAL
+};
+
+static guint signals[LAST_SIGNAL];
+
 G_DEFINE_TYPE (GtkForeignExported, _gtk_foreign_exported, G_TYPE_OBJECT)
 
 char *
@@ -37,6 +48,12 @@ _gtk_foreign_exported_get_handle_str (GtkForeignExported *exported)
 static void
 _gtk_foreign_exported_class_init (GtkForeignExportedClass *klass)
 {
+  signals[WINDOW_EXPORTED] = g_signal_new (I_("window-exported"),
+                                           G_TYPE_FROM_CLASS (klass),
+                                           G_SIGNAL_RUN_LAST,
+                                           0,
+                                           NULL, NULL, NULL,
+                                           G_TYPE_NONE, 0);
 }
 
 static void
