@@ -2355,6 +2355,9 @@ gdk_wayland_window_set_title (GdkWindow   *window,
 
   impl = GDK_WINDOW_IMPL_WAYLAND (window->impl);
 
+  if (impl->title && title && strcmp (title, impl->title) == 0)
+    return;
+
   g_free (impl->title);
 
   g_utf8_validate (title, MAX_WL_BUFFER_SIZE, &end);
