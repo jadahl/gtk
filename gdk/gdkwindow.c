@@ -664,6 +664,12 @@ gdk_window_is_toplevel (GdkWindow *window)
 }
 
 gboolean
+_gdk_window_is_toplevel (GdkWindow *window)
+{
+  return gdk_window_is_toplevel (window);
+}
+
+gboolean
 _gdk_window_has_impl (GdkWindow *window)
 {
   return gdk_window_has_impl (window);
